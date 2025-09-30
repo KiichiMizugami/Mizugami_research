@@ -1,13 +1,11 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
 import json
-import pandas as pd
 
 # ==============================
 # モデル準備
 # ==============================
 device = "cuda" if torch.cuda.is_available() else "cpu"
-
 model_id = "Qwen/Qwen2-0.5B"
 
 tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -18,88 +16,62 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 
 # ==============================
-# 1. 文法アノテーション生成
+# 対象の英作文
 # ==============================
-with open("ja_english_learner_essay.txt", "r", encoding="utf-8") as f:
-    essays = f.read().split("--- Essay ")
+essay_text = """
+I will work more part-time job this year, so I can make more friends.
+To learn English, I think that part-time job is good way.
 
-annotated_results = {}
+It is not necessary to explain the whole topic, there are many parts to make part-time job. In my opinion, it can be a good experience. I want to understand society, and I want to learn English. I think part-time job can be a good way to achieve this goal.
 
-for essay in essays:
-    if essay.strip() == "":
-        continue
-    lines = essay.strip().split("\n", 1)
-    essay_num = lines[0].strip()
-    essay_text = lines[1].strip() if len(lines) > 1 else ""
+I work in restaurant, and I have the same experience. I am still learning English. I have to learn how to deal with customers, and how to deal with people. I want to improve my English so that I can understand society better. I think it is good for college students to have a part-time job.
 
-    annotation_prompt = f"""
-You are a linguist expert specializing in doing text annotation in English as a second language.
-You will annotate the following essay text based on grammar and linguistic aspects.
-- Keep the passage unchanged.
-- Each annotation should be an object with 5 fields:
-  - type: type of annotation
-  - annotation sentence: the annotated sentence
-  - annotation token: the token(s) that are annotated
+In the end, I want to say that it is important for college students to have a part-time job. It can give the college student experience to learn responsibility and how to talk with customer. It can also improve the college student
+"""
+
+# ==============================
+# アノテーションプロンプト
+# ==============================
+annotation_prompt = f"""
+You are a linguist expert specializing in English as a second language.
+You will annotate the following essay based on grammar and linguistic aspects.
+
+Rules for annotation:
+- Keep the essay text unchanged.
+- Each annotation should be a JSON object with the following fields:
+  - type: type of annotation (e.g., tense error, article missing, singular/plural mistake, word choice)
+  - annotation sentence: the full sentence that contains the issue
+  - annotation token: the exact word(s) with the issue
   - rationale: reason for this annotation
   - grammar correctness: true if grammatically correct, false otherwise
-- Return the output as a JSON object with one or multiple annotations.
+
+Return the output as a JSON array (list of annotations).
 
 Essay text:
 {essay_text}
 """
 
-    inputs = tokenizer(annotation_prompt, return_tensors="pt").to(device)
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=500,
-        do_sample=True,
-        temperature=0.7
-    )
+# ==============================
+# モデルで生成
+# ==============================
+inputs = tokenizer(annotation_prompt, return_tensors="pt").to(device)
 
-    annotated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+outputs = model.generate(
+    **inputs,
+    max_new_tokens=600,
+    do_sample=True,
+    temperature=0.7,
+    pad_token_id=tokenizer.eos_token_id
+)
 
-    try:
-        annotated_json = json.loads(annotated_text)
-    except json.JSONDecodeError:
-        annotated_json = {"error": "Failed to parse JSON", "output_text": annotated_text}
-
-    annotated_results[essay_num] = annotated_json
-
-with open("ja_english_learner_essay_annotated.json", "w", encoding="utf-8") as f:
-    json.dump(annotated_results, f, ensure_ascii=False, indent=2)
-
-print("JSON形式の文法アノテーションファイルを作成しました！")
+annotated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 # ==============================
-# 2. JSONをCSVに変換
+# JSONの整形と出力
 # ==============================
-rows = []
-for essay_num, annotations in annotated_results.items():
-    if "error" in annotations:
-        rows.append({
-            "essay_num": essay_num,
-            "type": None,
-            "annotation_sentence": None,
-            "annotation_token": None,
-            "rationale": None,
-            "grammar_correctness": None,
-            "note": annotations.get("output_text")
-        })
-        continue
+try:
+    annotated_json = json.loads(annotated_text)
+except json.JSONDecodeError:
+    annotated_json = {"error": "Failed to parse JSON", "output_text": annotated_text}
 
-    for ann in annotations:
-        rows.append({
-            "essay_num": essay_num,
-            "type": ann.get("type"),
-            "annotation_sentence": ann.get("annotation sentence"),
-            "annotation_token": ann.get("annotation token"),
-            "rationale": ann.get("rationale"),
-            "grammar_correctness": ann.get("grammar correctness"),
-            "note": None
-        })
-
-df = pd.DataFrame(rows)
-df.to_csv("ja_english_learner_essay_annotated.csv", index=False, encoding="utf-8-sig")
-
-print("CSV形式で整理した文法アノテーションファイルを作成しました." \
-"")
+print(json.dumps(annotated_json, ensure_ascii=False, indent=2))
