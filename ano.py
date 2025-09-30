@@ -49,13 +49,15 @@ Return the output as a JSON array (list of annotations).
 
 Essay text:
 {essay_text}
+
+Output the annotations in JSON format:
 """
 
 # ==============================
 # モデルで生成
 # ==============================
 inputs = tokenizer(annotation_prompt, return_tensors="pt").to(device)
-
+#print(annotation_prompt)
 outputs = model.generate(
     **inputs,
     max_new_tokens=600,
@@ -65,13 +67,13 @@ outputs = model.generate(
 )
 
 annotated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+print(annotated_text)
+# # ==============================
+# # JSONの整形と出力
+# # ==============================
+# try:
+#     annotated_json = json.loads(annotated_text)
+# except json.JSONDecodeError:
+#     annotated_json = {"error": "Failed to parse JSON", "output_text": annotated_text}
 
-# ==============================
-# JSONの整形と出力
-# ==============================
-try:
-    annotated_json = json.loads(annotated_text)
-except json.JSONDecodeError:
-    annotated_json = {"error": "Failed to parse JSON", "output_text": annotated_text}
-
-print(json.dumps(annotated_json, ensure_ascii=False, indent=2))
+# print(json.dumps(annotated_json, ensure_ascii=False, indent=2))
