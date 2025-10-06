@@ -1,5 +1,13 @@
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
+import os
+
+# キャッシュ先を自分のホームに変更（権限エラー対策）
+os.environ["HF_HOME"] = os.path.expanduser("~/huggingface")
+os.environ["TRANSFORMERS_CACHE"] = os.path.expanduser("~/huggingface")
+
+# 出力ファイル
+output_file = "essays_output.txt"
 
 # デバイス設定
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -11,12 +19,12 @@ model_id = "Qwen/Qwen2-0.5B"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 model = AutoModelForCausalLM.from_pretrained(
     model_id,
-    torch_dtype=torch.float16,  # 高速化のためfloat16を使用
+    dtype=torch.float16,  # 修正済み
     device_map="auto"
 )
 
 # プロンプト
-prompt = """You are a Japanese English learner,but your English is still simple..
+prompt = """You are a Japanese English learner.
 Your native language is Japanese.
 Please write an English essay as if you are a Japanese student learning English.
 The essay should answer the following topic:
@@ -27,33 +35,37 @@ Write in simple English, and it is okay to include some small grammar mistakes t
 
 # トークナイズ
 inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
-# 入力のトークン数を取得
 input_length = inputs.input_ids.shape[1]
 
 # 生成する作文の数
 num_essays = 20
+outputs = model.generate(
+    **inputs,
+    max_new_tokens=350,
+    do_sample=True,
+    temperature=0.6,
+    pad_token_id=tokenizer.eos_token_id,
+    num_return_sequences=num_essays
+)
 
 print("--- LLMによる日本語母語話者の英作文シミュレーション（全20個） ---")
 print("-" * 60)
 
-for i in range(1, num_essays + 1):
-    outputs = model.generate(
-        **inputs,
-        max_new_tokens=200,
-        do_sample=True,
-        temperature=0.7,
-        pad_token_id=tokenizer.eos_token_id
-    )
+# ファイルを一度開いてまとめて書き込む
+with open(output_file, "w", encoding="utf-8") as f:
+    for i, output in enumerate(outputs, 1):
+        generated_tokens = output[input_length:]
+        essay = tokenizer.decode(generated_tokens, skip_special_tokens=True).strip()
 
-    # 入力部分を除外して生成部分だけを取り出す
-    generated_tokens = outputs[0][input_length:]
+        # 画面に出力
+        print(f"\n<<< Essay {i} >>>")
+        print(essay)
+        print("-" * 60)
 
-    # デコード
-    essay = tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        # ファイルに追記
+        f.write(f"<<< Essay {i} >>>\n")
+        f.write(essay + "\n")
+        f.write("-" * 60 + "\n")
 
-    print(f"\n<<< Essay {i} >>>")
-    print(essay.strip())  # 余計な空白を削除
-    print("-" * 60)
+print(f"生成を完了しました。すべてのエッセイを '{output_file}' にまとめて保存しました。")
 
-print("生成を完了しました。")
