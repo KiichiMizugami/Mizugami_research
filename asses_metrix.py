@@ -1,87 +1,169 @@
-import os
-import re
 import json
-from collections import Counter
+import pandas as pd
+from collections import Counter, defaultdict
 import math
-import glob
+import matplotlib.pyplot as plt
 
-# ==============================
-# 1️⃣ ディレクトリ設定
-# ==============================
-ICNALE_DIR = "/home/mizugami/Ja_English_Learner/icnale/ICNALE_WE_2.6/WE_3_Classified_Mereged_Tagged"
-LLM_FILE = "/home/mizugami/Ja_English_Learner/l2_evaluation_qwen2_7b_stable.json"
+# ===== 設定 =====
+LLM_FILE = "l2_annotations_llm.json"
+ICNALE_FILE = "l2_annotations_icnale.json"
 
-# ==============================
-# 2️⃣ ICNALEテキスト読み込み
-# ==============================
-def load_icnale_texts(icnale_dir):
-    texts = []
-    for path in glob.glob(os.path.join(icnale_dir, "*.txt")):
-        with open(path, "r", encoding="utf-8") as f:
-            content = f.read()
-            # 文単位に分割（簡易）
-            sentences = [s.strip() for s in re.split(r'[.?!]\s+', content) if s.strip()]
-            texts.extend(sentences)
-    return texts
-
-icnale_texts = load_icnale_texts(ICNALE_DIR)
-print(f"ICNALE文数: {len(icnale_texts)}")
-
-# ==============================
-# 3️⃣ LLM生成文読み込み
-# ==============================
-def load_llm_texts(llm_file):
-    with open(llm_file, "r", encoding="utf-8") as f:
+# ===== データ読み込み関数 =====
+def load_annotations(filepath, source_name):
+    """各ファイルを読み込み、フラット化してDataFrame化"""
+    with open(filepath, "r", encoding="utf-8") as f:
         data = json.load(f)
-    sentences = []
+
+    records = []
+    texts = []
     for essay in data:
+        essay_id = essay.get("essay_id") or essay.get("file_name")
+        text = essay.get("essay_text") or essay.get("text", "")
+        texts.append(text)
         for ann in essay.get("annotations", []):
-            s = ann.get("annotation sentence")
-            if s:
-                sentences.append(s.strip())
-    return sentences
+            records.append({
+                "source": source_name,
+                "essay_id": essay_id,
+                "aspect": ann.get("type"),
+                "sentence": ann.get("annotation sentence"),
+                "grammar_correctness": ann.get("grammar correctness"),
+                # X: L1 (ICNALEは元データから、LLMはプロンプトで指定)
+                "L1": essay.get("L1", "ja") if source_name=="ICNALE" else "ja"
+            })
+    return pd.DataFrame(records), texts
 
-llm_texts = load_llm_texts(LLM_FILE)
-print(f"LLM生成文数: {len(llm_texts)}")
+# ===== データ読み込み =====
+df_llm, llm_texts = load_annotations(LLM_FILE, "LLM")
+df_icnale, icnale_texts = load_annotations(ICNALE_FILE, "ICNALE")
+df_all = pd.concat([df_llm, df_icnale], ignore_index=True)
+
+# ===== 基本統計 =====
+print("=== L2 Annotation Comparative Analysis ===")
+print(f"LLM Essays: {df_llm['essay_id'].nunique()}, Annotations: {len(df_llm)}")
+print(f"ICNALE Essays: {df_icnale['essay_id'].nunique()}, Annotations: {len(df_icnale)}")
+
+# ===== 観点ごとの出現頻度比較 =====
+aspect_counts = (
+    df_all.groupby(["source", "aspect"])
+    .size()
+    .reset_index(name="count")
+    .pivot(index="aspect", columns="source", values="count")
+    .fillna(0)
+    .astype(int)
+)
+print("\n[観点別アノテーション数比較]")
+print(aspect_counts.to_markdown())
+
+# ===== True/False（grammar_correctness）の比率比較 =====
+correctness_pivot = (
+    df_all.groupby(["source", "aspect", "grammar_correctness"])
+    .size()
+    .reset_index(name="count")
+    .pivot_table(
+        index=["aspect"],
+        columns=["source", "grammar_correctness"],
+        values="count",
+        fill_value=0
+    )
+)
+print("\n[True/False（grammar correctness）分布比較]")
+print(correctness_pivot.to_markdown())
+
+# ===== 差分の可視化（割合） =====
+aspect_share = aspect_counts.div(aspect_counts.sum(axis=0), axis=1) * 100
+print("\n[観点ごとの割合（%）比較]")
+print(aspect_share.round(2).to_markdown())
 
 # ==============================
-# 4️⃣ 単語分布・情報理論指標
+# 情報理論的解析
 # ==============================
-def word_distribution(sentences):
-    counter = Counter()
-    total = 0
-    for s in sentences:
-        tokens = s.lower().split()
-        counter.update(tokens)
-        total += len(tokens)
-    probs = {w: c / total for w, c in counter.items()}
-    return probs
+def get_words(texts):
+    words = []
+    for text in texts:
+        words.extend(text.split())
+    return words
 
-def entropy(probs):
-    return -sum(p * math.log2(p) for p in probs.values())
+def word_probs(words):
+    total = len(words)
+    counts = Counter(words)
+    return {w: c/total for w, c in counts.items()}
 
-def kl_divergence(P, Q):
-    eps = 1e-10
-    all_tokens = set(P.keys()).union(Q.keys())
-    return sum(Q.get(w, eps) * math.log2(Q.get(w, eps) / P.get(w, eps)) for w in all_tokens)
+def entropy(prob_dist):
+    return -sum(p * math.log2(p) for p in prob_dist.values())
 
-# 分布計算
-P_llm = word_distribution(llm_texts)
-Q_icnale = word_distribution(icnale_texts)
+def kl_divergence(P, Q, epsilon=1e-12):
+    all_words = set(P.keys()) | set(Q.keys())
+    kl = 0.0
+    for w in all_words:
+        p = P.get(w, epsilon)
+        q = Q.get(w, epsilon)
+        kl += p * math.log2(p / q)
+    return kl
 
-# 指標計算
-H_icnale = entropy(Q_icnale)
-H_llm = entropy(P_llm)
-KL_icnale_llm = kl_divergence(P_llm, Q_icnale)
+# 単語分布とエントロピー
+P = word_probs(get_words(icnale_texts))
+Q = word_probs(get_words(llm_texts))
+H_icnale = entropy(P)
+H_llm = entropy(Q)
+KL = kl_divergence(P, Q)
 
-print("\n=== 情報理論的指標 ===")
-print(f"ICNALE 文書の語彙エントロピー: {H_icnale:.4f}")
-print(f"LLM生成文の語彙エントロピー: {H_llm:.4f}")
-print(f"KLダイバージェンス (ICNALE || LLM): {KL_icnale_llm:.4f}")
+print("\n=== Lexical Information-Theoretic Analysis ===")
+print(f"ICNALE Lexical Entropy: {H_icnale:.4f}")
+print(f"LLM Lexical Entropy: {H_llm:.4f}")
+print(f"KL Divergence (ICNALE || LLM): {KL:.4f}")
 
 # ==============================
-# 5️⃣ 文法アノテーションと結合可能（例）
+# 条件付き相互情報量 I(X;Y|D)
+# X: L1, Y: aspect, D: essay_id
 # ==============================
-# 後で各文の8観点スコアと組み合わせれば、
-# L1依存のバイアスや複雑度指標の解析が可能
+def conditional_mutual_info(df):
+    total = len(df)
+    # P(x,y,d)
+    p_xyz = Counter(tuple(x) for x in df[["L1","aspect","essay_id"]].values)
+    # P(x|d) and P(y|d)
+    p_xd = defaultdict(lambda: 0)
+    p_yd = defaultdict(lambda: 0)
+    p_d = defaultdict(lambda: 0)
+    for _, row in df.iterrows():
+        x, y, d = row["L1"], row["aspect"], row["essay_id"]
+        p_xyz[(x,y,d)] += 1
+        p_xd[(x,d)] += 1
+        p_yd[(y,d)] += 1
+        p_d[d] += 1
+    I = 0.0
+    for (x,y,d), c_xyz in p_xyz.items():
+        pxyd = c_xyz / total
+        pxd = p_xd[(x,d)] / total
+        pyd = p_yd[(y,d)] / total
+        pd = p_d[d] / total
+        I += pxyd * math.log2(pxyd / (pxd * pyd + 1e-12) + 1e-12)
+    return I
 
+I_icnale = conditional_mutual_info(df_icnale)
+I_llm = conditional_mutual_info(df_llm)
+delta_I = I_llm - I_icnale
+
+print("\n=== L1-Dependent Bias Analysis (Conditional Mutual Information) ===")
+print(f"I(ICNALE) = {I_icnale:.4f}")
+print(f"I(LLM)    = {I_llm:.4f}")
+print(f"ΔI        = {delta_I:.4f}  (0に近いほど人間L2のL1依存パターンを忠実に模倣)")
+
+# ===== 文長分布 =====
+def sentence_lengths(texts):
+    lengths = []
+    for t in texts:
+        for s in t.split('.'):
+            words = s.strip().split()
+            if words:
+                lengths.append(len(words))
+    return lengths
+
+icnale_lens = sentence_lengths(icnale_texts)
+llm_lens = sentence_lengths(llm_texts)
+
+plt.hist([icnale_lens, llm_lens], bins=20, label=["ICNALE", "LLM"], alpha=0.7)
+plt.xlabel("Sentence length (words)")
+plt.ylabel("Frequency")
+plt.title("Sentence Length Distribution")
+plt.legend()
+plt.show()
