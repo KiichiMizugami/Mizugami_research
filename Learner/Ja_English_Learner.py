@@ -52,7 +52,7 @@ input_length = inputs.input_ids.shape[1]
 # ==========================================
 #  生成パラメータ
 # ==========================================
-num_essays = 20
+num_essays = 75
 
 outputs = model.generate(
     **inputs,
